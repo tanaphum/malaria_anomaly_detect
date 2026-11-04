@@ -1,17 +1,179 @@
-#application for anomaly detection system for early warning of malaria in Thailand
+# Malaria app: persistent startup + default four-week map cache.
+# Build ONCE in the app directory, before deployment, in a fresh R session:
+#   options(malaria.build_cache = TRUE)
+#   source("app.R")
+#   options(malaria.build_cache = FALSE)
+# Then restart R and run shiny::runApp(). Include app_cache/ in deployment.
+# Rebuild after changing data, algorithms, app code, packages, or timezone.
 source("packages.R")
-source("ano_algo_fxns.R")
-source("load_data.R") 
-library(mapproj)
 library(sf)
 
-#remotes::install_github("r-spatial/sf")
-#library(sf)
+.cache_build <- isTRUE(getOption("malaria.build_cache", FALSE))
+.cache_path <- file.path("app_cache", "startup_4weeks.rds")
+.cache_defaults <- list(weeks = 4, species = "Vivax",
+                       method = "Baseline: Weekly Three Year Median",
+                       date = "2022-05-25")
+.cache_objects <- c("total_data", "prov_name", "thaimap", "temp_data_long",
+                    "precip_data_long", "approx_daily_temp", "approx_daily_precip")
+
+cache_signature <- function() {
+  scripts <- c("app.R", "packages.R", "load_data.R", "ano_algo_fxns.R")
+  inputs <- c("unfilt_data.csv", "gadm36_THA_1_sp.rds",
+              "tas_timeseries_monthly_cru_1901-2021_THA.csv",
+              "pr_timeseries_monthly_cru_1901-2021_THA.csv",
+              "sector_01_11201_EN_.csv")
+  missing_files <- c(scripts, inputs)[!file.exists(c(scripts, inputs))]
+  if (length(missing_files)) {
+    stop("Missing input files: ", paste(missing_files, collapse = ", "))
+  }
+  # Content hashes also work when deployment changes file timestamps.
+  # This reads source bytes but avoids CSV parsing and data preparation.
+  packages <- c("sf", "ggplot2", "dplyr", "plyr", "lubridate", "zoo", "tidyr", "readr")
+  list(schema = 1L, defaults = .cache_defaults,
+       scripts = tools::md5sum(scripts),
+       inputs = tools::md5sum(inputs),
+       R = as.character(getRversion()), timezone = Sys.timezone(),
+       packages = vapply(packages, function(x) as.character(utils::packageVersion(x)), ""))
+}
+
+# The original algorithm file sources load_data.R and packages.R at top level.
+# Load their contents only once, retaining all algorithm definitions unchanged.
+source_without_bootstrap <- function(file, envir = .GlobalEnv) {
+  expressions <- parse(file = file, keep.source = TRUE)
+  for (expression in expressions) {
+    duplicate_source <- is.call(expression) &&
+      identical(expression[[1L]], as.name("source")) &&
+      length(expression) >= 2L && is.character(expression[[2L]]) &&
+      length(expression[[2L]]) == 1L &&
+      expression[[2L]] %in% c("load_data.R", "packages.R")
+    if (!duplicate_source) eval(expression, envir = envir)
+  }
+  invisible(NULL)
+}
+
+.signature <- cache_signature()
+.disk_cache <- NULL
+if (!.cache_build && file.exists(.cache_path)) {
+  candidate <- tryCatch(readRDS(.cache_path), error = function(e) NULL)
+  required <- c("signature", "data", "geometry", "weekly_summary", "weekly_cases",
+                "default_result", "anomaly_grob", "sir_grob")
+  if (is.list(candidate) && all(required %in% names(candidate)) &&
+      identical(candidate$signature, .signature) &&
+      all(.cache_objects %in% names(candidate$data))) {
+    .disk_cache <- candidate
+    message("Startup cache: HIT (data, Summary and default four-week maps).")
+  } else {
+    message("Startup cache: stale or unreadable; loading original data. Rebuild cache.")
+  }
+  rm(candidate)
+}
+if (is.null(.disk_cache)) {
+  source_without_bootstrap("load_data.R")
+  message("Startup data: prepared from source files (once).")
+} else {
+  list2env(.disk_cache$data, envir = .GlobalEnv)
+}
+source_without_bootstrap("ano_algo_fxns.R")
+
+# Identical plot definitions for building and displaying the cached maps.
+make_map_plot <- function(geometry, kind = c("anomaly", "sir")) {
+  kind <- match.arg(kind)
+  if (kind == "anomaly") {
+    plot <- ggplot2::ggplot(geometry) +
+      ggplot2::geom_sf(ggplot2::aes(fill = status), colour = NA) +
+      ggplot2::scale_fill_manual(
+        values = c("0" = "dodgerblue", "1" = "brown1"), breaks = c("0", "1"),
+        labels = c("No Anomaly Detected", "Anomaly Detected"),
+        drop = FALSE, name = "Status")
+  } else {
+    plot <- ggplot2::ggplot(geometry) +
+      ggplot2::geom_sf(ggplot2::aes(fill = SIR), colour = NA)
+  }
+  plot + ggplot2::coord_sf(crs = 4326, default_crs = 4326,
+                          xlim = c(96, 106), ylim = c(6, 20.5)) +
+    ggplot2::labs(x = "longitude", y = "latitude", title = "") +
+    ggplot2::theme_minimal()
+}
+
+attach_map_values <- function(result, geometry) {
+  unmatched <- setdiff(as.character(result$province), as.character(geometry$NAME_1))
+  if (length(unmatched)) stop("Unmatched provinces: ", paste(unmatched, collapse = ", "))
+  index <- match(as.character(geometry$NAME_1), as.character(result$province))
+  geometry$status <- factor(result$status[index], levels = c(0, 1))
+  geometry$SIR <- result$SIR[index]
+  geometry
+}
+
+# Performance: immutable source data are loaded once per R process above.
+# Cache successful results only; restart the app after changing source data.
+# Keep expensive Summary work out of server() startup and the About page.
+get_weekly_summary <- local({
+  cached <- if (!is.null(.disk_cache)) .disk_cache$weekly_summary else NULL
+  function() {
+    if (is.null(cached)) {
+      end_date <- as.POSIXct("2022-05-25")
+      result <- find_anomaly(lubridate::weeks(1), end_date, "Historical Average")
+      cached <<- result
+    }
+    cached
+  }
+})
+
+get_weekly_cases <- local({
+  cached <- if (!is.null(.disk_cache)) .disk_cache$weekly_cases else NULL
+  function() {
+    if (is.null(cached)) {
+      end_date <- as.POSIXct("2022-05-25")
+      cached <<- filter_data(total_data, end_date - lubridate::weeks(1), end_date)
+    }
+    cached
+  }
+})
+
+# Preserve the complete original boundaries (including polygon holes).
+# Convert once, lazily, rather than fortifying on every plot redraw.
+get_thai_geometry <- local({
+  cached <- if (!is.null(.disk_cache)) .disk_cache$geometry else NULL
+  function() {
+    if (is.null(cached)) {
+      geometry <- sf::st_as_sf(thaimap)
+      stopifnot("NAME_1" %in% names(geometry))
+      if (is.na(sf::st_crs(geometry))) {
+        stop("The Thai map has no CRS. Set its verified source CRS before plotting.")
+      }
+      cached <<- geometry[, "NAME_1", drop = FALSE]
+    }
+    cached
+  }
+})
+
+# The spinner wrapper stays hidden until the first Compute click.
+# Client-side conditions also reveal it while the server is busy computing.
+map_output_panel <- function(output_id) {
+  shiny::tagList(
+    shiny::conditionalPanel(
+      condition = "!input.go || input.go === 0",
+      shiny::div(
+        style = "padding: 40px 20px; color: #6c757d; text-align: center;",
+        "Select the options and click Compute to display the map."
+      )
+    ),
+    shiny::conditionalPanel(
+      condition = "input.go > 0",
+      style = "display: none;",
+      addSpinner(
+        shiny::plotOutput(output_id, width = "100%", height = "80vh"),
+        spin = "cube", color = "royalblue"
+      )
+    )
+  )
+}
 
 ui <- bs4Dash::dashboardPage(
   title = "Shiny Application",
+  help = NULL,
   bs4Dash::dashboardHeader(
-    title = "",
+   
     align = "Anomaly Detection of Malaria in Thailand"
   ),
   #creates three main tabs
@@ -244,13 +406,13 @@ ui <- bs4Dash::dashboardPage(
           
           bs4Dash::bs4TabCard(
             #outputs the anomaly detection map and the standardised incidence ratio map 
-            width = 8,
+            width = 8, height = 800,
             collapsible = FALSE,
             status = "white",
             tabPanel(title = "ANOMALY MAP", value = "test3",
-                     addSpinner(plotOutput("modelPlot", width = "100%", height = "80vh"), spin = "cube", color = "royalblue"),align = "center"), 
+                     map_output_panel("modelPlot"),align = "center"), 
             tabPanel(title = "STANDARDISED INCIDENCE RATIO MAP", value = "test2",
-                     addSpinner(plotOutput("modelPlot2", width = "100%", height = "80vh"),spin = "cube", color = "royalblue"),align = "center"),
+                     map_output_panel("modelPlot2"),align = "center"),
             # tabPanel(title = "METHOD COMPARISON", value = "test4",
             #          addSpinner(DT::dataTableOutput("comparison"),spin = "cube", color = "royalblue"),align = "center"),
             tabPanel(title = "METHOD COMPARISON", value = "test4",
@@ -289,7 +451,18 @@ server <- function(input, output, session) {
   #   
   # })
   
+  computed_settings <- eventReactive(input$go, {
+    list(weeks = as.numeric(input$Weeks_Prior), species = input$species,
+         method = input$method, date = "2022-05-25")
+  })
+
+  use_default_cache <- reactive({
+    !is.null(.disk_cache) && identical(computed_settings(), .cache_defaults)
+  })
+
   modelOut <- eventReactive(input$go, {
+    if (use_default_cache()) return(.disk_cache$default_result)
+
     #define the nujmber of weeks wanted to analysis
     week_num <- input$Weeks_Prior
     
@@ -312,39 +485,21 @@ server <- function(input, output, session) {
     return(ano_act)
   })
   
-    #Plot Thai Map 
-    output$modelPlot <- renderPlot({
-    
-    #joins the data to the map from rworld map
-    thaiLevel1 <- rworldmap::joinData2Map(modelOut(),nameMap="thaimap",nameJoinIDMap="NAME_1",nameJoinColumnData="province")
-    thaiLevel1@data$id <- rownames(thaiLevel1@data)
-    thaiLevel1@data$status = as.factor(thaiLevel1@data$status)
-    
-    map <- fortify(thaiLevel1)
-    
-    map$id <- as.integer(map$id)
-    
-    #extracts the data associated with each province and connects that to each province
-    dat <- data.frame(id = thaiLevel1@data$id, state = thaiLevel1@data$NAME_1, status =thaiLevel1@data$status)
-    dat$id <- as.numeric(dat$id)
-    
-    map_df <- inner_join(map, dat, by = "id")
-    
-    #plots the data for each province
-    ggplot() +
-      geom_map(data = map_df, map = map_df,
-               aes(map_id = id, x = long, y = lat, group = group, fill = status),
-               size = 0.25) +
-      ggplot2::coord_map() + scale_fill_manual(labels=c( "No Anomaly Detected","Anomaly Detected"), values = c("dodgerblue","brown1"), name = "Status")+
-      labs(x = "longitude", y = "latitude", title = "")  + ggplot2::coord_sf(
-        crs = 4326, default_crs = 4326,
-        xlim = c(96, 106), ylim = c(6, 20.5)
-      ) +
-      theme_minimal()
-    
-  }, height = 550, width = 550)
-  
-  
+  # One map attribute match for non-default computations.
+  model_map <- reactive({
+    attach_map_values(modelOut(), get_thai_geometry())
+  })
+
+  output$modelPlot <- renderPlot({
+    req(input$go > 0)
+    if (use_default_cache()) {
+      grid::grid.newpage()
+      grid::grid.draw(.disk_cache$anomaly_grob)
+    } else {
+      print(make_map_plot(model_map(), "anomaly"))
+    }
+  }, height = 700, width = 700)
+
   #adding sparklines
   line_string <- "type: 'line', lineColor: 'blue', fillColor: '#A7DBD8', highlightLineColor: 'orange', highlightSpotColor: 'orange'"
   
@@ -376,7 +531,7 @@ server <- function(input, output, session) {
                 "Monthly Case Four Years","Baseline: Weekly Three Year Median")
     NumberReported <- c(882 ,6493,75, 5, 452, 10875, 35602, 5577, 32630 )
     NumberActual <- rep(7,9)
-    NumberActualDetected <- c(1,2,0,0,0,6,6,0,6)
+    NumberActualDetected <- c(1,3,0,0,0,6,6,0,6)
     AccuracyPercentage <- (NumberActualDetected/NumberActual)*100
     dt <- data.table(Method,NumberReported,NumberActual,NumberActualDetected,AccuracyPercentage)
     
@@ -384,23 +539,14 @@ server <- function(input, output, session) {
 
   })
   
-  #Analysis for the weekly summary page
-  #filters the weekly summary data
-  method = "Historical Average"
-  prev_time <- weeks(1)
-  latest_date <- as.POSIXct('2022-05-25')
-  
-  data_week_summary <- find_anomaly(prev_time,latest_date,method)
-  
-  #case counts for trend plot
-  prev_date_week_sum <- latest_date - weeks(1)
-  #filters the data for just the previous week
-  data_week <- filter_data(total_data,prev_date_week_sum, latest_date)
-  
+  # These lazy reactives run only when their visible outputs request them.
+  data_week_summary <- reactive(get_weekly_summary())
+  data_week <- reactive(get_weekly_cases())
+
   #creates the proportion map for the summary page 
   output$summary_plot <- renderPlot({
     
-    data <- week_summary(data_week_summary)
+    data <- week_summary(data_week_summary())
     
     ggplot(data, aes(ymax=ymax, ymin=ymin, xmax=4, xmin=3, fill = c("brown3","cornflowerblue"))) +
       geom_rect() +
@@ -424,7 +570,7 @@ server <- function(input, output, session) {
   #information about the species makeup of these cases
   output$summary_trend_plot <- renderPlot({
     
-    ggplot(data_week) +
+    ggplot(data_week()) +
       aes(x = blood_draw_date, fill = result_code_detail_1) +
       geom_histogram(bins = 30L) +
       scale_fill_hue(direction = 1) +
@@ -436,40 +582,64 @@ server <- function(input, output, session) {
   #render the summary table containing provinces with anomalies detected
   output$summary_table <- renderTable({
     
-    prov_ano <- data.frame(data_week_summary$province[data_week_summary$status > 0])
+    prov_ano <- data.frame(data_week_summary()$province[data_week_summary()$status > 0])
     colnames(prov_ano) <- "Provinces with Anomalies"
     return(prov_ano)
   })
   
-  #Plots the standardised incidence ratio map 
   output$modelPlot2 <- renderPlot({
-    
-    thai_SIR <- rworldmap::joinData2Map(modelOut(),nameMap="thaimap",nameJoinIDMap="NAME_1",nameJoinColumnData="province")
-    thai_SIR@data$id <- rownames(thai_SIR@data) 
-    map_SIR <- fortify(thai_SIR)
-    
-    map_SIR$id <- as.integer(map_SIR$id)
-    dat_SIR <- data.frame(id = thai_SIR@data$id, state = thai_SIR@data$NAME_1, SIR =thai_SIR@data$SIR )
-    dat_SIR$id <- as.numeric(dat_SIR$id) 
-    
-    map_df_SIR <- inner_join(map_SIR, dat_SIR, by = "id")
-    
-    ggplot() +
-      geom_map(data = map_df_SIR, map = map_df_SIR,
-               aes(map_id = id, x = long, y = lat, group = group, fill = SIR),
-               size = 0.25) +
-      coord_map() + 
-      labs(x = "longitude", y = "latitude", title = "") + coord_sf(
-       crs = 4326, default_crs = 4326,
-       xlim = c(96, 106), ylim = c(6, 20.5)
-      ) + theme_minimal()
-      
-    
-  }, height = 550, width = 500)
+    req(input$go > 0)
+    if (use_default_cache()) {
+      grid::grid.newpage()
+      grid::grid.draw(.disk_cache$sir_grob)
+    } else {
+      print(make_map_plot(model_map(), "sir"))
+    }
+  }, height = 700, width = 700)
+
   
   
 }
 #rsconnect::configureApp(appName = "Malaria_Anomaly_Detection_App", account = "moru",size="xlarge")
 #rsconnect::showLogs()
 # Run the application 
-shinyApp(ui = ui, server = server) 
+if (.cache_build) {
+  message("Building persistent cache; this step can take time and does not launch Shiny.")
+  latest_date <- as.POSIXct(.cache_defaults$date)
+  prev_time <- lubridate::weeks(.cache_defaults$weeks)
+  prov <- SIR_EV(total_data, prev_time, latest_date)
+  default_result <- find_anomaly(prev_time, latest_date, .cache_defaults$method,
+                                 prov, temp_data_long, precip_data_long, "V")
+  # Validate results before storing: never persist a failed or empty computation.
+  stopifnot(is.data.frame(default_result), nrow(default_result) > 0L,
+            all(c("province", "status", "SIR", "cases") %in% names(default_result)),
+            !anyDuplicated(default_result$province),
+            all(default_result$status %in% c(0, 1)))
+  geometry <- get_thai_geometry()
+  default_map <- attach_map_values(default_result, geometry)
+  bundle <- list(signature = .signature,
+                 data = mget(.cache_objects, envir = .GlobalEnv),
+                 geometry = geometry, weekly_summary = get_weekly_summary(),
+                 weekly_cases = get_weekly_cases(), default_result = default_result,
+                 anomaly_grob = ggplot2::ggplotGrob(make_map_plot(default_map, "anomaly")),
+                 sir_grob = ggplot2::ggplotGrob(make_map_plot(default_map, "sir")))
+  # Do not save a mixed snapshot if an input changed during the build.
+  stopifnot(identical(.signature, cache_signature()))
+  dir.create(dirname(.cache_path), recursive = TRUE, showWarnings = FALSE)
+  temporary <- tempfile("startup_", tmpdir = dirname(.cache_path), fileext = ".rds")
+  # Uncompressed RDS trades disk space for faster startup reads.
+  saveRDS(bundle, temporary, compress = FALSE)
+  restored <- readRDS(temporary)
+  stopifnot(identical(restored$signature, bundle$signature),
+            isTRUE(all.equal(restored$default_result, default_result)),
+            isTRUE(all.equal(restored$data$total_data, total_data)))
+  # Publish only after successful serialization checks (app must be stopped).
+  if (!file.copy(temporary, .cache_path, overwrite = TRUE)) {
+    stop("Could not publish cache: ", .cache_path)
+  }
+  unlink(temporary)
+  message("Cache built: ", normalizePath(.cache_path),
+          "\nRestart R, then run shiny::runApp().")
+} else {
+  shinyApp(ui = ui, server = server)
+} 
