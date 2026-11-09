@@ -1,10 +1,11 @@
 # Malaria app: persistent startup + default four-week map cache.
 # Build ONCE in the app directory, before deployment, in a fresh R session:
-#   options(malaria.build_cache = TRUE)
-#   source("app.R")
-#   options(malaria.build_cache = FALSE)
+  # options(malaria.build_cache = TRUE)
+  # source("app.R")
+  # options(malaria.build_cache = FALSE)
 # Then restart R and run shiny::runApp(). Include app_cache/ in deployment.
 # Rebuild after changing data, algorithms, app code, packages, or timezone.
+Sys.setenv(TZ = "Asia/Bangkok")
 source("packages.R")
 library(sf)
 
@@ -54,7 +55,23 @@ source_without_bootstrap <- function(file, envir = .GlobalEnv) {
 .signature <- cache_signature()
 .disk_cache <- NULL
 if (!.cache_build && file.exists(.cache_path)) {
-  candidate <- tryCatch(readRDS(.cache_path), error = function(e) NULL)
+  candidate <- tryCatch(
+    readRDS(.cache_path),
+    error = function(e) {
+      message("Cache read failed: ", conditionMessage(e))
+      NULL
+    }
+  )
+  
+  if (is.list(candidate) && !is.null(candidate$signature)) {
+    fields <- union(names(candidate$signature), names(.signature))
+    different <- fields[vapply(fields, function(key) {
+      !identical(candidate$signature[[key]], .signature[[key]])
+    }, logical(1))]
+    
+    message("Cache signature mismatch: ",
+            paste(different, collapse = ", "))
+  }
   required <- c("signature", "data", "geometry", "weekly_summary", "weekly_cases",
                 "default_result", "anomaly_grob", "sir_grob")
   if (is.list(candidate) && all(required %in% names(candidate)) &&
