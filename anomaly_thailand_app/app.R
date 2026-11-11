@@ -268,7 +268,9 @@ make_ui <- function() bs4Dash::dashboardPage(
             # tabPanel(title = "METHOD COMPARISON", value = "test4",
             #          shinyWidgets::addSpinner(DT::dataTableOutput("comparison"),spin = "cube", color = "royalblue"),align = "center"),
             tabPanel(title = "METHOD COMPARISON", value = "test4",
-                    DT::dataTableOutput("comparison"),align = "center"),
+                    # card is fixed at height 800, so scroll inside it instead of overflowing
+                    div(style = "max-height: 700px; overflow: auto;",
+                        DT::dataTableOutput("comparison")),align = "center"),
             tabPanel(title = "MAP DESCRIPTIONS",align = "left", strong("Anomaly Map:"),"This map highlights provinces with unsual or anomalous activity
                    activity as a result of the time frame and method selected.", br(),br(),
                      strong("Standardised Incidence Ratio Map:"),"This map shows the ratio of the observed number of malaria cases compared to the expected
@@ -367,12 +369,12 @@ server <- function(input, output, session) {
     NumberReported <- c(882 ,6493,75, 5, 452, 10875, 35602, 5577, 32630 )
     NumberActual <- rep(7,9)
     NumberActualDetected <- c(1,3,0,0,0,6,6,0,6)
-    AccuracyPercentage <- (NumberActualDetected/NumberActual)*100
+    AccuracyPercentage <- round((NumberActualDetected/NumberActual)*100, 2)
     dt <- data.table(Method,NumberReported,NumberActual,NumberActualDetected,AccuracyPercentage)
-    
+
     return(dt)
 
-  })
+  }, options = list(scrollX = TRUE))
   
   # These lazy reactives run only when their visible outputs request them.
   data_week_summary <- reactive(get_weekly_summary())
