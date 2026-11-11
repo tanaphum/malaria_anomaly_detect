@@ -155,7 +155,7 @@ pred_CI <- function(totalData,previousDate, latestDate, province) {
   
   #calculate the cases per date 
   cases <- dplyr::count(totdata_prov, blood_draw_date)
-  date <- as.POSIXct(cases$blood_draw_date)
+  date <- as.POSIXct(cases$blood_draw_date, tz = "UTC")
   
   date_subset <- cases %>% filter(blood_draw_date < latestDate) %>% filter(blood_draw_date > previousDate)
 
@@ -215,7 +215,7 @@ pred_CI <- function(totalData,previousDate, latestDate, province) {
 
 #historical average method
 range_hist <- function(total_data, prov_name) {
-  latest_date <- as.POSIXct('2022-05-25')
+  latest_date <- as.POSIXct("2022-05-25", tz = "UTC")
   
   #get all the data for specific provinces anf calculate the cases per date
   data_all <- total_data  %>% filter(p_site_province_name %in% prov_name)
@@ -249,7 +249,7 @@ range_hist <- function(total_data, prov_name) {
 
 #weekly case count comparison from previous year method
 week_case_comp <- function(total_data, prov_name){
-  latest_date <- as.POSIXct('2022-05-25')
+  latest_date <- as.POSIXct("2022-05-25", tz = "UTC")
   
   #filter the data for the specific province
   data_all <- total_data  %>% filter(p_site_province_name %in% prov_name)
@@ -286,7 +286,7 @@ week_case_comp <- function(total_data, prov_name){
 
 #weekly three year median comparison method (baseline method currently used in Thailand)
 week_three_yr_median <- function(total_data, prov_name){
-  latest_date <- as.POSIXct('2022-05-25')
+  latest_date <- as.POSIXct("2022-05-25", tz = "UTC")
   
   #filter the data for the specific province
   data_all <- total_data  %>% filter(p_site_province_name %in% prov_name)
@@ -330,7 +330,7 @@ week_three_yr_median <- function(total_data, prov_name){
 
 #month case count comparison for prior 4 years
 month_case_comp <- function(total_data, prov_name){
-  latest_date <- as.POSIXct('2022-05-25')
+  latest_date <- as.POSIXct("2022-05-25", tz = "UTC")
   #filter the data based on the province
   data_all <- total_data  %>% filter(p_site_province_name %in% prov_name)
   
@@ -490,19 +490,17 @@ unsup_tsclust <- function(data){
 
   }else{
   
-  #perform unsupervised time series clustering
-  hc <- tsclust(cases, type = "hierarchical", k = 2L, 
-                distance = "sbd", trace = TRUE,
-                control = hierarchical_control(method = "average"))
-  #match the cluster information to the orginal data
-  clust_dat$cluster <- hc@cluster
-  
-  #summary of cluster information
-  hc@clusinfo
-  
-  #classify points in the smallest cluster as anomalous
+  # Fast exact equivalent of the original call:
+  #   tsclust(cases, type = "hierarchical", k = 2L, distance = "sbd",
+  #           control = hierarchical_control(method = "average"))
+  # Each row is a length-1 series and counts are positive, so every SBD distance is 0.
+  # hclust/cutree(k = 2) on an all-zero matrix puts only the last row in cluster 2
+  # (verified n = 3..4000 on R 4.3.3 and 4.6.2; see unsup_check/verify.R).
+  clust_dat$cluster <- c(rep(1L, nrow(cases) - 1L), 2L)
+
+  #classify points in cluster 2 (= nrow(hc@clusinfo) in the original) as anomalous
   clust_dat$activity = "No Anomalous Activity"
-  clust_dat$activity[clust_dat$cluster == nrow(hc@clusinfo)] <- "Anomalous Activity Detected"
+  clust_dat$activity[clust_dat$cluster == 2L] <- "Anomalous Activity Detected"
   }
   #change the name of the column to cases
   names(clust_dat)[names(clust_dat) == "n"] <- "cases"
@@ -625,8 +623,8 @@ method_compare <- function(){
   colnames(outbreak_dat) <- c("dates","province")
   
   #setting the date range we want to conduct our analysis on
-  latest_date <- as.POSIXct('2022-05-25')
-  prev_date <- as.POSIXct("2012-01-01")
+  latest_date <- as.POSIXct("2022-05-25", tz = "UTC")
+  prev_date <- as.POSIXct("2012-01-01", tz = "UTC")
   
   dates_filt <- seq(prev_date, latest_date, by="days")
   

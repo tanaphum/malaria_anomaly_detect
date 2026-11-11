@@ -1,42 +1,17 @@
-library(mapproj)
-library(sf)
-library(pacman)
-p_load(deSolve,
-       tidyverse,
-       shiny,
-       shinycssloaders,
-       shinyBS,
-       readxl,
-       ggplot2,
-       data.table,
-       tidyr,
-       doParallel,
-       manipulate, 
-       dplyr, 
-       rsconnect,
-       zoo,
-       forecast,
-       dbscan,
-       dtwclust,
-       cluster,
-       fpc,
-       factoextra,
-       lubridate,
-       RColorBrewer,
-       rworldmap,
-       kableExtra,
-       leaflet,
-       raster,
-       xts,
-       plyr,
-       readr,
-       shiny,
-       shiny.i18n,
-       shinyWidgets,
-       googleLanguageR,
-       devtools,
-       DT,
-       sparkline
-)
-
-
+# Unqualified calls in the current app, load_data.R and ano_algo_fxns.R.
+library(shiny)
+library(ggplot2)
+library(data.table)
+library(tidyr)
+library(dplyr)
+library(zoo)
+library(forecast)
+library(dtwclust)
+# The existing density methods use fpc::dbscan (capital MinPts).
+library(fpc)
+library(lubridate)
+library(plyr)
+library(readr)
+library(DT)
+# Register the spatial classes used by the original province map RDS.
+loadNamespace("sp")
