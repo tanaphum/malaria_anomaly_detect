@@ -7,8 +7,9 @@ rscript <- file.path(R.home("bin"), "Rscript.exe")
 stopifnot(file.exists(rscript), file.exists(file.path(app_dir, "build_cache.R")))
 
 
-status <- system2(rscript, c("--vanilla", "build_cache.R"))
-system2(rscript, c("--vanilla", "build_cache.R"))
+# build_cache.R uses relative paths, so the child must start in app_dir.
+old_wd <- setwd(app_dir)
+status <- tryCatch(system2(rscript, c("--vanilla", "build_cache.R")), finally = setwd(old_wd))
 
 if (!identical(status, 0L)) stop("Cache build failed (exit status ", status, "). See messages above.")
 message("Cache build finished. Restart the app.")
