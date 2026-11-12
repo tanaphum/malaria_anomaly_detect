@@ -320,7 +320,9 @@ server <- function(input, output, session) {
     saved <- read_compute(settings)
     if (!is.null(saved)) return(saved)
     compute_result(settings)
-  })
+  }) |>
+    # Algorithms are deterministic (no RNG/clock), so one result per settings is shared by all sessions.
+    bindCache(computed_settings())
 
   # One map attribute match for non-default computations.
   model_map <- reactive({
@@ -335,7 +337,8 @@ server <- function(input, output, session) {
     } else {
       print(make_map_plot(model_map(), "anomaly"))
     }
-  }, height = 700, width = 700)
+  }, height = 700, width = 700) |>
+    bindCache(computed_settings())
 
   #adding sparklines
   line_string <- "type: 'line', width: '100%', lineColor: 'blue', fillColor: '#A7DBD8', highlightLineColor: 'orange', highlightSpotColor: 'orange'"
@@ -432,7 +435,8 @@ server <- function(input, output, session) {
     } else {
       print(make_map_plot(model_map(), "sir"))
     }
-  }, height = 700, width = 700)
+  }, height = 700, width = 700) |>
+    bindCache(computed_settings())
 
   
   

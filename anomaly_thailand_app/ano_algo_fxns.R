@@ -1,6 +1,13 @@
 source("load_data.R")
 source("packages.R")
 
+# Split by province once per process; every per-province filter below then scans only that province.
+data_by_prov <- split(total_data, total_data$p_site_province_name)
+# NA/unknown province falls back to the full data, so filter_data(%in%) behaves exactly as before.
+get_prov_data <- function(p) {
+  if (!is.na(p) && !is.null(data_by_prov[[p]])) data_by_prov[[p]] else total_data
+}
+
 
 #function to filter data based input parameters. Included are the start date, end date, province, border type, and species ( user input parameters)
 filter_data <- function(data,start_date,end_date,province_filter_values = NULL, border_filter_values = NULL, species = NULL) {
@@ -50,8 +57,9 @@ find_anomaly <- function(prev_time,latest_date, method, province_pop = NULL,temp
   #for(i in 1:20){
     
     #filter for species testing
-    if(missing(species)) data <- filter_data(total_data,prev_date,latest_date,province_filter_values = prov_name[i])
-    else data <- filter_data(total_data,prev_date,latest_date,province_filter_values = prov_name[i], species = species) 
+    d_prov <- get_prov_data(prov_name[i])
+    if(missing(species)) data <- filter_data(d_prov,prev_date,latest_date,province_filter_values = prov_name[i])
+    else data <- filter_data(d_prov,prev_date,latest_date,province_filter_values = prov_name[i], species = species)
     #using the x time from previous date
 
     #total cases within the selected time frame
@@ -62,8 +70,8 @@ find_anomaly <- function(prev_time,latest_date, method, province_pop = NULL,temp
     if(nrow(data) > 0){ 
       
       #find the anomlies depending on method defined by the user
-      df_comp <- ano_algo(method,data, total_data, prev_date,latest_date, prov_name[i],temp_data_long, precip_data_long)
-      
+      df_comp <- ano_algo(method,data, d_prov, prev_date,latest_date, prov_name[i],temp_data_long, precip_data_long)
+
       #match the values for activity in the results based on the dates from the final data frame and result data frame.
       ano_df[i+1] <- df_comp$activity[match(as.Date(ano_df$dates),as.Date(df_comp$blood_draw_date))]
       
